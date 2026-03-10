@@ -43,7 +43,6 @@ class TenantCreate(BaseModel):
     slug: str | None = None
     admin_email: str
     admin_name: str
-    admin_name: str
     admin_password: str
     community_type: str | None = "APARTMENTS" # APARTMENTS, OWN_HOUSES
 
@@ -765,32 +764,39 @@ async def delete_tenant(
     # Hard Delete: Delete everything related to this tenant to save space.
     # Order matters due to Foreign Keys.
     
-    # 1. Ancillary Data
-    await db.execute(delete(Document).where(Document.tenant_id == tid))
-    await db.execute(delete(WorkOrder).where(WorkOrder.tenant_id == tid))
-    await db.execute(delete(Violation).where(Violation.tenant_id == tid))
+    # 1. Deep ancillary (child rows first)
+    await db.execute(delete(ArcReview).where(ArcReview.tenant_id == tid))
+    await db.execute(delete(WorkOrderEvent).where(WorkOrderEvent.tenant_id == tid))
+    await db.execute(delete(DocumentEmbedding).where(DocumentEmbedding.tenant_id == tid))
+    await db.execute(delete(UserContact).where(UserContact.tenant_id == tid))
     await db.execute(delete(Hearing).where(Hearing.tenant_id == tid))
     await db.execute(delete(ViolationNotice).where(ViolationNotice.tenant_id == tid))
+
+    # 2. Primary ancillary tables
+    await db.execute(delete(Document).where(Document.tenant_id == tid))
+    await db.execute(delete(DocumentFolder).where(DocumentFolder.tenant_id == tid))
+    await db.execute(delete(WorkOrder).where(WorkOrder.tenant_id == tid))
+    await db.execute(delete(Violation).where(Violation.tenant_id == tid))
     await db.execute(delete(ArcRequest).where(ArcRequest.tenant_id == tid))
     await db.execute(delete(Announcement).where(Announcement.tenant_id == tid))
     
-    # 2. Financials
+    # 3. Financials
     await db.execute(delete(Payment).where(Payment.tenant_id == tid))
     await db.execute(delete(Charge).where(Charge.tenant_id == tid))
     await db.execute(delete(Invoice).where(Invoice.tenant_id == tid))
     await db.execute(delete(LedgerAccount).where(LedgerAccount.tenant_id == tid))
     
-    # 3. People & profiles
+    # 4. People & profiles
     await db.execute(delete(ResidentProfile).where(ResidentProfile.tenant_id == tid))
     await db.execute(delete(Occupancy).where(Occupancy.tenant_id == tid))
     await db.execute(delete(TenantUser).where(TenantUser.tenant_id == tid))
     
-    # 4. Property Structure
+    # 5. Property Structure
     # Units depend on Buildings, so Units first
     await db.execute(delete(Unit).where(Unit.tenant_id == tid))
     await db.execute(delete(Building).where(Building.tenant_id == tid))
 
-    # 5. The Tenant itself
+    # 6. The Tenant itself
     await db.execute(delete(Tenant).where(Tenant.id == tid))
     
     await db.commit()

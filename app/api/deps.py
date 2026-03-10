@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from fastapi import Depends, Header, Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from jose import jwt, JWTError
 
@@ -11,6 +12,7 @@ from app.core.errors import AppError
 from app.core.tenant import resolve_tenant, TenantContext
 from app.core.rbac import AuthContext
 from app.core.security import decode_access_token
+from app.db.models import TenantUser, User
 
 
 async def get_tenant_ctx(
@@ -50,11 +52,8 @@ async def get_auth_ctx(
     tenant_id = payload.get("tid")
     is_platform_admin = payload.get("is_platform_admin", False)
 
-    # Normal User Verification
-    from sqlalchemy import select
-    from app.db.models import TenantUser, User
-    
     # 🔍 Security Check: Refresh user profile & verify token still matches current state
+
     res = await db.execute(
         select(User.password_hash).where(User.id == user_id)
     )
@@ -67,11 +66,17 @@ async def get_auth_ctx(
     if payload.get("pv") != user_row[:8]:
         raise AppError(code="AUTH_CREDENTIALS_CHANGED", message="Credentials changed, please log in again", status_code=401)
 
+    roles = list(payload.get("roles", []))
+    # Legacy role mapping for backward compatibility
+    if "RESIDENT" in roles and "USER" not in roles:
+        roles.append("USER")
+    
+    # Normalize BOARD_ADMIN to ADMIN for proper permission inheritance
+    if "BOARD_ADMIN" in roles and "ADMIN" not in roles:
+        roles.append("ADMIN")
+
     # PLATFORM ADMIN BYPASS: Grant them full admin access to any tenant they want
     if is_platform_admin:
-        # Since they are platform admin, we don't strictly require tenant membership.
-        # However, they must specify a valid tenant ID to proceed if they aren't at the /admin level
-        # We can just use the token's tid or the resolved tenant's tid
         return AuthContext(
             user_id=str(user_id),
             tenant_id=str(tenant.tenant_id),
@@ -79,8 +84,6 @@ async def get_auth_ctx(
         )
 
     # Normal User Verification
-    from sqlalchemy import select
-    from app.db.models import TenantUser
     try:
         res = await db.execute(
             select(TenantUser.status).where(
@@ -97,15 +100,6 @@ async def get_auth_ctx(
         # Log unexpected DB errors but return 401 for safety
         raise AppError(code="DB_ERROR", message="Cannot verify user session", status_code=401)
 
-    roles = list(payload.get("roles", []))
-    # Legacy role mapping for backward compatibility
-    if "RESIDENT" in roles and "USER" not in roles:
-        roles.append("USER")
-    
-    # Normalize BOARD_ADMIN to ADMIN for proper permission inheritance
-    if "BOARD_ADMIN" in roles and "ADMIN" not in roles:
-        roles.append("ADMIN")
-        
     return AuthContext(
         user_id=str(user_id),
         tenant_id=str(tenant_id),

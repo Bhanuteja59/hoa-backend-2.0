@@ -2,7 +2,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
+import re
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_db, get_tenant_ctx, require, get_auth_ctx
 from app.core.tenant import TenantContext
@@ -36,8 +37,6 @@ class UserOut(BaseModel):
     created_at: datetime
 
 
-from pydantic import BaseModel, EmailStr, field_validator
-import re
 
 class UserCreateIn(BaseModel):
     name: str
@@ -55,7 +54,9 @@ class UserCreateIn(BaseModel):
 
     @field_validator("password")
     @classmethod
-    def validate_password(cls, v: str) -> str:
+    def validate_password(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
         if len(v) < 8:
             raise ValueError("Password must be at least 8 characters long")
         if not re.search(r"[A-Z]", v):

@@ -648,24 +648,8 @@ class UserService:
         if payload.address is not None:
             contact.address = payload.address
             
-        # The instruction refers to 'UserService.update_user' and 'tu.registration_number',
-        # but the provided code snippet is within 'update_my_contact' and refers to 'contact'.
-        # Assuming the intent was to update a 'TenantUser' object's 'registration_number'
-        # in a method that handles user updates, and that 'tu' would be the TenantUser object.
-        # Since 'update_user' is not present in the provided context, and 'tu' is not defined here,
-        # this specific part of the change cannot be applied as written without causing a NameError.
-        # However, to faithfully apply the *spirit* of the change as provided in the snippet,
-        # if there were a 'tu' object (TenantUser) available in this scope, and 'payload.registration_number'
-        # was intended for it, it would look like this:
-        # if payload.registration_number is not None:
-        #      tu.registration_number = payload.registration_number
-        #      db.add(tu)
-        # As 'tu' is not available here, and 'contact' (UserContact) does not have 'registration_number',
-        # this part of the change is omitted to maintain syntactical correctness.
-        # If the intention was to add a 'registration_number' to 'UserContact', the model would need modification.
-        # If the intention was to modify a different method, please provide that method's context.
-            
         db.add(contact)
+
         await db.commit()
         
         return ContactOut(
