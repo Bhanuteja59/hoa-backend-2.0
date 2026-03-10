@@ -118,6 +118,7 @@ class UserService:
                     email=email or "hidden@example.com",
                     name=name,
                     role=tu.roles[0] if tu.roles else "USER",
+                    roles=tu.roles if tu.roles else ["USER"],
                     status=getattr(tu, "status", "active"),
                     unit_id=str(tu.unit_id) if tu.unit_id else None,
                     unit_number=unit.unit_number if unit else None,
