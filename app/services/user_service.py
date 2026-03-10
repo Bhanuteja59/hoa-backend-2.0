@@ -271,7 +271,7 @@ class UserService:
         await db.commit()
 
         try:
-            frontend_url = settings.FRONTEND_URL.rstrip("/")
+            frontend_url = settings.NEXTAUTH_URL.rstrip("/")
             if is_invite:
                 subject = f"Welcome to {tenant.name} - Invitation to Join"
                 invite_link = f"{frontend_url}/register?token={invitation_token}"
