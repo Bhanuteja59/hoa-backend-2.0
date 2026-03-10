@@ -74,6 +74,7 @@ class Settings(BaseSettings):
         "http://localhost:3001",
         "https://hoa-frontend-beryl.vercel.app",
         "https://hoa-frontend-three.vercel.app",
+        "https://hoa-frontend-2-0.vercel.app",
     ]
 
     # Chatbot
