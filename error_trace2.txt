@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "D:\HOA\new4\repo\hoa-backend\test_reg.py", line 25, in run
+    await AuthService.register(payload, db)
+  File "D:\HOA\new4\repo\hoa-backend\app\services\auth_service.py", line 176, in register
+    raise AppError(
+    ...<3 lines>...
+    )
+app.core.errors.AppError
+
+String rep: 
