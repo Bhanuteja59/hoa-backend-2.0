@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     MAX_UPLOAD_MB: int = 20
 
     # Frontend Host (for invitation links)
-    FRONTEND_URL: str = "http://localhost:3000"
+    NEXTAUTH_URL: str = "http://localhost:3000"
 
     # Tenant dev override
     DEV_ALLOW_TENANT_HEADER: bool = True

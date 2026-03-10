@@ -339,7 +339,7 @@ class AuthService:
         try:
             greeting_subject = "Welcome to HOA SaaS Platform"
             greeting_body = f"<h1>Welcome, {user.name}!</h1><p>Your account has been successfully created.</p>"
-            frontend_url = "https://hoa-frontend-three.vercel.app/"
+            frontend_url = settings.NEXTAUTH_URL.rstrip("/")
             
             if assigned_role == "ADMIN" or assigned_role == "BOARD_ADMIN":
                  greeting_subject = "Welcome to the Board - HOA Platform"
