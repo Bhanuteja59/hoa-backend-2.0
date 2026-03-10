@@ -61,6 +61,15 @@ async def require_platform_admin(
         raise AppError(code="FORBIDDEN", message="Platform admin access required", status_code=403)
     return user
 
+# Admin panel path prefixes that should NEVER count in public/user analytics
+ADMIN_PATH_PREFIXES = ("/admin",)
+
+def _is_admin_path(path: str | None) -> bool:
+    """Return True if the path belongs to the super-admin panel."""
+    if not path:
+        return False
+    return any(path.startswith(prefix) for prefix in ADMIN_PATH_PREFIXES)
+
 # --- Analytics Schemas ---
 class AnalyticsTrackIn(BaseModel):
     event_type: str
@@ -77,9 +86,15 @@ async def track_analytics(
 ):
     """
     Publicly accessible endpoint to record a page view or other event.
+    Super-admin visits and admin-panel paths are silently ignored.
     """
+    # Silently drop events for admin-panel paths — they must not pollute analytics
+    if _is_admin_path(payload.path):
+        return {"ok": True}
+
     # Try to get user_id from token if present, but don't fail if not
     user_id = None
+    is_platform_admin = False
     auth = request.headers.get("authorization", "")
     if auth.startswith("Bearer "):
         try:
@@ -87,8 +102,18 @@ async def track_analytics(
             if token and token.strip():
                 p = decode_access_token(token)
                 user_id = p.get("sub")
+                # Check if this is a platform admin — their visits should not count
+                if user_id:
+                    res = await db.execute(
+                        select(User.is_platform_admin).where(User.id == UUID(user_id))
+                    )
+                    is_platform_admin = bool(res.scalar())
         except:
             pass
+
+    # Silently drop events from platform admins — they skew user analytics
+    if is_platform_admin:
+        return {"ok": True}
 
     ip = request.client.host if request.client else "unknown"
     
@@ -119,17 +144,51 @@ async def get_analytics_stats(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_platform_admin),
 ):
-    from sqlalchemy import func, cast, Date
+    from sqlalchemy import func, cast, Date, not_
     from datetime import timedelta
     
-    # Timeline
     dt_start = datetime.utcnow() - timedelta(days=days-1)
+
+    # ── Base filter: exclude admin-panel paths AND platform-admin user visits ──
+    # We join AnalyticsEvent with User so we can check is_platform_admin.
+    # Events with no user_id are anonymous public visitors — always counted.
+    def base_filters():
+        """Return a list of WHERE conditions that exclude super-admin traffic."""
+        # Exclude any path that starts with /admin
+        admin_path_filter = not_(
+            func.lower(AnalyticsEvent.path).like("/admin%")
+        )
+        # Exclude events belonging to platform admins (left-join: NULL user_id is NOT an admin)
+        not_platform_admin = (
+            (AnalyticsEvent.user_id == None) |
+            (
+                select(User.id)
+                .where(
+                    User.id == AnalyticsEvent.user_id,
+                    User.is_platform_admin == True
+                )
+                .correlate(AnalyticsEvent)
+                .exists()
+                .is_(False)
+            )
+        )
+        return [AnalyticsEvent.created_at >= dt_start, admin_path_filter, not_platform_admin]
+
+    # ── Timeline: unique visitor count per day ──
+    from sqlalchemy import String, cast as sa_cast
     res = await db.execute(
         select(
             cast(AnalyticsEvent.created_at, Date).label("day"),
-            func.count(AnalyticsEvent.id).label("count")
+            func.count(
+                func.distinct(
+                    func.coalesce(
+                        sa_cast(AnalyticsEvent.user_id, String),
+                        sa_cast(AnalyticsEvent.id, String)
+                    )
+                )
+            ).label("count")
         )
-        .where(AnalyticsEvent.created_at >= dt_start)
+        .where(*base_filters())
         .group_by(cast(AnalyticsEvent.created_at, Date))
         .order_by(cast(AnalyticsEvent.created_at, Date))
     )
@@ -144,23 +203,49 @@ async def get_analytics_stats(
             "visitors": traffic.get(day_str, 0)
         })
 
-    # Location Breakdown
+    # ── Location Breakdown (user visits only) ──
     res_loc = await db.execute(
         select(AnalyticsEvent.location, func.count(AnalyticsEvent.id))
+        .where(*base_filters())
         .group_by(AnalyticsEvent.location)
         .order_by(func.count(AnalyticsEvent.id).desc())
         .limit(5)
     )
     locations = [{"name": row[0] or "Unknown", "value": row[1]} for row in res_loc]
 
-    # Top Pages
+    # ── Top Pages: only real-user pages, counting each user once per path ──
+    # For authenticated users: count distinct user IDs
+    # For anonymous visitors: count distinct event IDs (each event = 1 unique visit)
+    from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+    from sqlalchemy import String, cast as sa_cast
     res_pages = await db.execute(
-        select(AnalyticsEvent.path, func.count(AnalyticsEvent.id))
+        select(
+            AnalyticsEvent.path,
+            func.count(
+                func.distinct(
+                    func.coalesce(
+                        sa_cast(AnalyticsEvent.user_id, String),
+                        sa_cast(AnalyticsEvent.id, String)
+                    )
+                )
+            ).label("unique_visitors")
+        )
+        .where(*base_filters())
         .group_by(AnalyticsEvent.path)
-        .order_by(func.count(AnalyticsEvent.id).desc())
-        .limit(5)
+        .order_by(
+            func.count(
+                func.distinct(
+                    func.coalesce(
+                        sa_cast(AnalyticsEvent.user_id, String),
+                        sa_cast(AnalyticsEvent.id, String)
+                    )
+                )
+            ).desc()
+        )
+        .limit(10)
     )
     top_pages = [{"path": row[0] or "/", "count": row[1]} for row in res_pages]
+
 
     return {
         "timeline": timeline,

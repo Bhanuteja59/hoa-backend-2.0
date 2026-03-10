@@ -18,6 +18,7 @@ class UserOut(BaseModel):
     email: EmailStr
     name: str
     role: str
+    roles: list[str] = []  # All roles the user holds in this tenant
     status: str | None = "active"
     unit_id: str | None = None
     unit: str | None = None
