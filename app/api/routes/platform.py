@@ -801,7 +801,10 @@ async def get_platform_detailed_stats(
         .group_by(func.date_trunc("month", User.created_at))
         .order_by(func.date_trunc("month", User.created_at))
     )
-    new_users_by_month = {row.month.month: row.cnt for row in new_users_res}
+    new_users_by_month = {}
+    for row in new_users_res:
+        if row.month:
+            new_users_by_month[row.month.month] = row.cnt
 
     # Query for monthly actions (work orders + violations + arc)
     wo_act_res = await db.execute(select(func.date_trunc("month", WorkOrder.created_at).label("m"), func.count(WorkOrder.id).label("c")).where(WorkOrder.created_at >= six_months_ago).group_by(func.date_trunc("month", WorkOrder.created_at)))
@@ -809,12 +812,14 @@ async def get_platform_detailed_stats(
     ar_act_res = await db.execute(select(func.date_trunc("month", ArcRequest.created_at).label("m"), func.count(ArcRequest.id).label("c")).where(ArcRequest.created_at >= six_months_ago).group_by(func.date_trunc("month", ArcRequest.created_at)))
     
     activity_by_month = {}
-    for r in wo_act_res: activity_by_month[r.m.month] = activity_by_month.get(r.m.month, 0) + r.c
-    for r in vi_act_res: activity_by_month[r.m.month] = activity_by_month.get(r.m.month, 0) + r.c
-    for r in ar_act_res: activity_by_month[r.m.month] = activity_by_month.get(r.m.month, 0) + r.c
+    for r in wo_act_res:
+        if r.m: activity_by_month[r.m.month] = activity_by_month.get(r.m.month, 0) + r.c
+    for r in vi_act_res:
+        if r.m: activity_by_month[r.m.month] = activity_by_month.get(r.m.month, 0) + r.c
+    for r in ar_act_res:
+        if r.m: activity_by_month[r.m.month] = activity_by_month.get(r.m.month, 0) + r.c
 
     timeline = []
-    current_month_idx = now.month - 1
     for i in range(7):
         target_date = now - timedelta(days=(6-i)*30)
         m_idx = target_date.month
@@ -824,9 +829,9 @@ async def get_platform_detailed_stats(
             "newUsers": new_users_by_month.get(m_idx, 0),
         })
 
-    # 2. Communities Table Data
+    # 2. Communities Table Data (Aggregated)
     t_res = await db.execute(select(Tenant.id, Tenant.name, Tenant.slug, Tenant.status, Tenant.community_type))
-    tenants = t_res.all()
+    tenants_list = t_res.all()
     
     # Fast grouped aggregations
     u_res = await db.execute(select(TenantUser.tenant_id, func.count(TenantUser.id)).group_by(TenantUser.tenant_id))
@@ -845,15 +850,15 @@ async def get_platform_detailed_stats(
     docs_info_by_tenant = {row[0]: (row[1], row[2] or 0) for row in d_res}
     
     community_stats = []
-    for t_id, t_name, t_slug, t_status, t_ctype in tenants:
+    for tenant_row in tenants_list:
+        t_id, t_name, t_slug, t_status, t_ctype = tenant_row
         u_count = users_by_tenant.get(t_id, 0)
         w_count = workorders_by_tenant.get(t_id, 0)
         v_count = violations_by_tenant.get(t_id, 0)
         a_count = arc_by_tenant.get(t_id, 0)
         d_count, d_size = docs_info_by_tenant.get(t_id, (0, 0))
         
-        # Real storage calculation
-        storage_mb = d_size / (1024 * 1024)
+        storage_mb = (d_size or 0) / (1024 * 1024)
         
         community_stats.append({
             "id": str(t_id),
