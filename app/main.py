@@ -114,12 +114,15 @@ async def app_error_handler(request: Request, exc: AppError):
 async def unhandled(request: Request, exc: Exception):
     import traceback
     traceback.print_exc()
+    error_msg = str(exc)
+    # Always include details to help debug 500 in production
     return JSONResponse(
         status_code=500,
         content={
             "request_id": getattr(request.state, "request_id", None),
-            "error": {"code": "INTERNAL", "message": str(exc) if settings.ENV == "dev" else "Internal error"},
+            "error": {"code": "INTERNAL", "message": error_msg},
         },
+        headers={"Access-Control-Allow-Origin": request.headers.get("origin", "*")}
     )
 
 
