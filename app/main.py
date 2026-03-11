@@ -40,14 +40,17 @@ configure_logging()
 
 app = FastAPI(title="HOA SaaS API", version="1.0.0")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.BACKEND_CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["*"],
-)
+# CORS Middleware (placed down to be Outer)
+def setup_cors(app: FastAPI):
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.BACKEND_CORS_ORIGINS,
+        allow_origin_regex=r"https://hoa-.*\.vercel\.app",  # Support Vercel previews
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["*", "x-request-id"],
+    )
 
 # Mount Uploads
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -57,10 +60,26 @@ app.mount("/uploads", StaticFiles(directory=ABS_UPLOAD_DIR), name="uploads")
 
 @app.middleware("http")
 async def request_id_mw(request: Request, call_next):
-    request.state.request_id = request.headers.get("x-request-id") or f"req_{uuid.uuid4().hex[:12]}"
-    resp = await call_next(request)
-    resp.headers["x-request-id"] = request.state.request_id
-    return resp
+    # Generate or get request ID
+    req_id = request.headers.get("x-request-id") or str(uuid.uuid4())[:12]
+    request.state.request_id = req_id
+    
+    try:
+        resp = await call_next(request)
+        resp.headers["x-request-id"] = req_id
+        return resp
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        # Ensure CORS headers are present even in middleware-level crashes
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"code": "INTERNAL", "message": "Critical Server Error"}},
+            headers={"Access-Control-Allow-Origin": request.headers.get("origin", "*")}
+        )
+
+# Finalize CORS as outermost
+setup_cors(app)
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
@@ -93,11 +112,13 @@ async def app_error_handler(request: Request, exc: AppError):
 
 @app.exception_handler(Exception)
 async def unhandled(request: Request, exc: Exception):
+    import traceback
+    traceback.print_exc()
     return JSONResponse(
         status_code=500,
         content={
-            "request_id": request.state.request_id,
-            "error": {"code": "INTERNAL", "message": "Internal error"},
+            "request_id": getattr(request.state, "request_id", None),
+            "error": {"code": "INTERNAL", "message": str(exc) if settings.ENV == "dev" else "Internal error"},
         },
     )
 
