@@ -28,12 +28,6 @@ class ViolationIn(BaseModel):
     description: str
     attachment_url: str | None = None
 
-class ViolationIn(BaseModel):
-    unit_id: str | None = None
-    type: str
-    description: str
-    attachment_url: str | None = None
-
 class ViolationPatch(BaseModel):
     type: str | None = None
     description: str | None = None

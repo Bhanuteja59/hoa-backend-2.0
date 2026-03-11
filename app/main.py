@@ -1,6 +1,8 @@
 # backend/app/main.py
 from __future__ import annotations
 
+import os
+import shutil
 import uuid
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -48,9 +50,10 @@ app.add_middleware(
 )
 
 # Mount Uploads
-import os
-os.makedirs("uploads", exist_ok=True)
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ABS_UPLOAD_DIR = os.path.join(BASE_DIR, "..", "uploads")
+os.makedirs(ABS_UPLOAD_DIR, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=ABS_UPLOAD_DIR), name="uploads")
 
 @app.middleware("http")
 async def request_id_mw(request: Request, call_next):

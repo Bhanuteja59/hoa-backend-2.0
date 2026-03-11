@@ -198,21 +198,12 @@ class AuthService:
                     tenant_res = await db.execute(select(Tenant).where(Tenant.id == tu.tenant_id))
                     tenant = tenant_res.scalar_one()
                 else:
-                    if payload.role in ["ADMIN", "BOARD_ADMIN"] and payload.hoa_name:
-                        logging.info(f"Existing user {email} is creating a new community.")
-                        user.name = payload.full_name
-                        user.password_hash = hash_password(payload.password)
-                        if payload.phone:
-                            user.phone = payload.phone
-                        db.add(user)
-                        tu = None
-                    else:
-                        logging.warning(f"Registration attempt for existing active user without matching credentials: {email}")
-                        raise AppError(
-                            code="EMAIL_EXISTS",
-                            message="User already exists",
-                            status_code=400
-                        )
+                    logging.warning(f"Registration attempt for existing user: {email}")
+                    raise AppError(
+                        code="EMAIL_EXISTS",
+                        message="Email is already registered. Please login or use a different email.",
+                        status_code=400
+                    )
             else:
                 logging.info(f"Creating new user: {email}")
                 # 2️⃣ Create a NEW user
