@@ -802,22 +802,43 @@ async def get_platform_detailed_stats(
         .order_by(func.date_trunc("month", User.created_at))
     )
     new_users_by_month = {}
-    for row in new_users_res:
-        if row.month:
-            new_users_by_month[row.month.month] = row.cnt
+    for row in new_users_res.mappings():
+        m = row["month"]
+        if m:
+            # Handle both datetime objects and strings (depending on driver)
+            m_idx = m.month if hasattr(m, "month") else int(str(m).split("-")[1])
+            new_users_by_month[m_idx] = row["cnt"]
 
-    # Query for monthly actions (work orders + violations + arc)
-    wo_act_res = await db.execute(select(func.date_trunc("month", WorkOrder.created_at).label("m"), func.count(WorkOrder.id).label("c")).where(WorkOrder.created_at >= six_months_ago).group_by(func.date_trunc("month", WorkOrder.created_at)))
-    vi_act_res = await db.execute(select(func.date_trunc("month", Violation.created_at).label("m"), func.count(Violation.id).label("c")).where(Violation.created_at >= six_months_ago).group_by(func.date_trunc("month", Violation.created_at)))
-    ar_act_res = await db.execute(select(func.date_trunc("month", ArcRequest.created_at).label("m"), func.count(ArcRequest.id).label("c")).where(ArcRequest.created_at >= six_months_ago).group_by(func.date_trunc("month", ArcRequest.created_at)))
-    
+    # Activity aggregation helper
+    async def get_activity(model):
+        res = await db.execute(
+            select(
+                func.date_trunc("month", model.created_at).label("m"), 
+                func.count(model.id).label("c")
+            )
+            .where(model.created_at >= six_months_ago)
+            .group_by(func.date_trunc("month", model.created_at))
+        )
+        return res.mappings().all()
+
     activity_by_month = {}
-    for r in wo_act_res:
-        if r.m: activity_by_month[r.m.month] = activity_by_month.get(r.m.month, 0) + r.c
-    for r in vi_act_res:
-        if r.m: activity_by_month[r.m.month] = activity_by_month.get(r.m.month, 0) + r.c
-    for r in ar_act_res:
-        if r.m: activity_by_month[r.m.month] = activity_by_month.get(r.m.month, 0) + r.c
+    for r in await get_activity(WorkOrder):
+        m = r["m"]
+        if m:
+            m_idx = m.month if hasattr(m, "month") else int(str(m).split("-")[1])
+            activity_by_month[m_idx] = activity_by_month.get(m_idx, 0) + r["c"]
+    
+    for r in await get_activity(Violation):
+        m = r["m"]
+        if m:
+            m_idx = m.month if hasattr(m, "month") else int(str(m).split("-")[1])
+            activity_by_month[m_idx] = activity_by_month.get(m_idx, 0) + r["c"]
+
+    for r in await get_activity(ArcRequest):
+        m = r["m"]
+        if m:
+            m_idx = m.month if hasattr(m, "month") else int(str(m).split("-")[1])
+            activity_by_month[m_idx] = activity_by_month.get(m_idx, 0) + r["c"]
 
     timeline = []
     for i in range(7):
@@ -833,32 +854,43 @@ async def get_platform_detailed_stats(
     t_res = await db.execute(select(Tenant.id, Tenant.name, Tenant.slug, Tenant.status, Tenant.community_type))
     tenants_list = t_res.all()
     
-    # Fast grouped aggregations
-    u_res = await db.execute(select(TenantUser.tenant_id, func.count(TenantUser.id)).group_by(TenantUser.tenant_id))
-    users_by_tenant = {row[0]: row[1] for row in u_res}
+    # Fast grouped aggregations using mappings for safety
+    async def get_tenant_counts(model, agg_func=func.count, col=None):
+        col = col if col is not None else model.id
+        res = await db.execute(select(model.tenant_id, agg_func(col).label("val")).group_by(model.tenant_id))
+        return {r["tenant_id"]: r["val"] for r in res.mappings()}
+
+    users_by_tenant = await get_tenant_counts(TenantUser)
+    workorders_by_tenant = await get_tenant_counts(WorkOrder)
+    violations_by_tenant = await get_tenant_counts(Violation)
+    arc_by_tenant = await get_tenant_counts(ArcRequest)
     
-    w_res = await db.execute(select(WorkOrder.tenant_id, func.count(WorkOrder.id)).group_by(WorkOrder.tenant_id))
-    workorders_by_tenant = {row[0]: row[1] for row in w_res}
-    
-    v_res = await db.execute(select(Violation.tenant_id, func.count(Violation.id)).group_by(Violation.tenant_id))
-    violations_by_tenant = {row[0]: row[1] for row in v_res}
-    
-    a_res = await db.execute(select(ArcRequest.tenant_id, func.count(ArcRequest.id)).group_by(ArcRequest.tenant_id))
-    arc_by_tenant = {row[0]: row[1] for row in a_res}
-    
-    d_res = await db.execute(select(Document.tenant_id, func.count(Document.id), func.sum(Document.size_bytes)).group_by(Document.tenant_id))
-    docs_info_by_tenant = {row[0]: (row[1], row[2] or 0) for row in d_res}
+    # Special handling for document storage sum
+    d_res = await db.execute(
+        select(
+            Document.tenant_id, 
+            func.count(Document.id).label("cnt"), 
+            func.sum(Document.size_bytes).label("size")
+        ).group_by(Document.tenant_id)
+    )
+    docs_info_by_tenant = {r["tenant_id"]: (r["cnt"], r["size"] or 0) for r in d_res.mappings()}
     
     community_stats = []
     for tenant_row in tenants_list:
-        t_id, t_name, t_slug, t_status, t_ctype = tenant_row
+        # Explicit unpacking from row object
+        t_id = tenant_row[0]
+        t_name = tenant_row[1]
+        t_slug = tenant_row[2]
+        t_status = tenant_row[3]
+        t_ctype = tenant_row[4]
+
         u_count = users_by_tenant.get(t_id, 0)
         w_count = workorders_by_tenant.get(t_id, 0)
         v_count = violations_by_tenant.get(t_id, 0)
         a_count = arc_by_tenant.get(t_id, 0)
         d_count, d_size = docs_info_by_tenant.get(t_id, (0, 0))
         
-        storage_mb = (d_size or 0) / (1024 * 1024)
+        storage_mb = float(d_size or 0) / (1024 * 1024)
         
         community_stats.append({
             "id": str(t_id),
@@ -866,10 +898,10 @@ async def get_platform_detailed_stats(
             "slug": t_slug,
             "status": t_status,
             "community_type": t_ctype,
-            "users": u_count,
-            "maintenance": w_count,
-            "violations": v_count,
-            "arc": a_count,
+            "users": int(u_count),
+            "maintenance": int(w_count),
+            "violations": int(v_count),
+            "arc": int(a_count),
             "storage_mb": round(storage_mb, 2)
         })
 
