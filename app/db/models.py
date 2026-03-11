@@ -496,8 +496,9 @@ class AnalyticsEvent(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
     user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    session_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)  # Browser session fingerprint
     event_type: Mapped[str] = mapped_column(String(50), nullable=False) # page_view, active_session
-    path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     ip_address: Mapped[str | None] = mapped_column(String(50), nullable=True)
     location: Mapped[str | None] = mapped_column(String(255), nullable=True) # City, Country
     user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
