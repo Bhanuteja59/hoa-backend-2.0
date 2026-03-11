@@ -128,7 +128,7 @@ async def update_work_order(
     ctx: AuthContext = Depends(require("work_orders:write")),
 ):
     res = await db.execute(select(WorkOrder).where(
-        WorkOrder.tenant_id == tenant.tenant_id, WorkOrder.id == UUID(work_order_id)
+        WorkOrder.tenant_id == UUID(tenant.tenant_id), WorkOrder.id == UUID(work_order_id)
     ))
     wo = res.scalar_one_or_none()
     if not wo:
@@ -137,9 +137,13 @@ async def update_work_order(
     now = datetime.now(timezone.utc)
     
     # RBAC Check: Residents cannot assign users, but can update description/title
+    # RBAC Check: Residents cannot assign users or change status
     if "USER" in ctx.roles and "ADMIN" not in ctx.roles and "BOARD" not in ctx.roles and "BOARD_MEMBER" not in ctx.roles:
        if payload.assigned_to_user_id is not None:
             raise AppError(code="NO_PERMISSION", message="Residents cannot assign work orders", status_code=403)
+       if payload.status is not None and payload.status != wo.status:
+            # Residents might be allowed to CANCEL, but let's be strict for now
+            raise AppError(code="NO_PERMISSION", message="Residents cannot change work order status", status_code=403)
 
 
     changed = False
@@ -181,7 +185,7 @@ async def list_work_order_events(
     ctx: AuthContext = Depends(require("work_orders:read")),
 ):
     res = await db.execute(select(WorkOrderEvent).where(
-        WorkOrderEvent.tenant_id == tenant.tenant_id,
+        WorkOrderEvent.tenant_id == UUID(tenant.tenant_id),
         WorkOrderEvent.work_order_id == UUID(work_order_id),
     ).order_by(WorkOrderEvent.created_at.asc()))
     return [
@@ -207,7 +211,7 @@ async def delete_work_order(
         raise AppError(code="NO_PERMISSION", message="Only admins/board can delete tickets", status_code=403)
         
     res = await db.execute(select(WorkOrder).where(
-        WorkOrder.tenant_id == tenant.tenant_id, 
+        WorkOrder.tenant_id == UUID(tenant.tenant_id), 
         WorkOrder.id == UUID(work_order_id)
     ))
     wo = res.scalar_one_or_none()

@@ -8,32 +8,54 @@ from app.core.config import settings
 
 router = APIRouter(prefix="/uploads", tags=["Uploads"])
 
-UPLOAD_DIR = "uploads"
+# Use absolute path for upload directory to avoid CWD issues
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 @router.post("")
 async def upload_file(file: UploadFile = File(...)):
+    """
+    Saves a file to the local uploads directory and returns the relative URL.
+    Used for attachments in Work Orders, ARC requests, and Violations.
+    """
     try:
-        # Validate extension (basic)
-        ext = file.filename.split(".")[-1].lower() if "." in file.filename else "tmp"
-        if ext not in ["jpg", "jpeg", "png", "pdf", "docx", "txt"]:
-            raise HTTPException(status_code=400, detail="Unsupported file type")
+        # Validate filename
+        if not file.filename:
+             raise HTTPException(status_code=400, detail="Filename missing")
+             
+        filename_str = str(file.filename)
+        ext = filename_str.split(".")[-1].lower() if "." in filename_str else "bin"
+        
+        # Allowed extensions (broadened to be safe)
+        allowed = ["jpg", "jpeg", "png", "gif", "pdf", "doc", "docx", "xls", "xlsx", "txt", "csv"]
+        if ext not in allowed:
+            raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}")
 
-        # Generate unique filename
-        filename = f"{uuid.uuid4().hex}.{ext}"
-        filepath = os.path.join(UPLOAD_DIR, filename)
+        # Generate unique filename to avoid collisions and directory traversal
+        secure_filename = f"{uuid.uuid4().hex}.{ext}"
+        filepath = os.path.join(UPLOAD_DIR, secure_filename)
 
-        # Save
+        # Ensure directory exists (redundant but safe)
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+        # Save the file
         with open(filepath, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # Return URL (Relative to backend base)
-        # Assuming backend mounts /uploads at root or /static
-        # Let's assume we mount it at /static/uploads for safety or just /uploads
-        # Returning full relative path.
-        url = f"/uploads/{filename}"
+        # Return the relative path which is served via StaticFiles mount
+        url = f"/uploads/{secure_filename}"
         
-        return {"url": url, "filename": filename, "original_name": file.filename}
+        return {
+            "url": url, 
+            "filename": secure_filename, 
+            "original_name": file.filename,
+            "status": "success"
+        }
 
+    except HTTPException:
+        raise
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")

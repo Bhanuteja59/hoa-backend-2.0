@@ -2,7 +2,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.api.deps import get_db, get_auth_ctx
+from app.api.deps import get_db, get_auth_ctx, get_platform_auth_ctx
 from app.core.rbac import AuthContext
 from app.core.errors import AppError
 from app.core.security import hash_password, decode_access_token
@@ -53,7 +53,7 @@ class TenantUpdate(BaseModel):
 
 async def require_platform_admin(
     db: AsyncSession = Depends(get_db),
-    ctx: AuthContext = Depends(get_auth_ctx)
+    ctx: AuthContext = Depends(get_platform_auth_ctx)
 ) -> User:
     res = await db.execute(select(User).where(User.id == UUID(ctx.user_id)))
     user = res.scalar_one_or_none()
@@ -138,6 +138,174 @@ async def track_analytics(
     await db.commit()
     return {"ok": True}
 
+@router.get("/stats/realtime")
+async def get_realtime_stats(
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_platform_admin),
+):
+    """
+    Returns visitors active in the last 5 minutes (real-time snapshot).
+    Also returns a 30-minute rolling window broken into 1-minute buckets.
+    Rich data for a Google Analytics Real-Time style dashboard.
+    """
+    from sqlalchemy import func, cast, String, not_, or_
+    from datetime import timedelta
+
+    now = datetime.utcnow()
+    five_min_ago = now - timedelta(minutes=5)
+    thirty_min_ago = now - timedelta(minutes=30)
+
+    def apply_realtime_filters(query):
+        """JOIN with User and exclude admin/platform-admin traffic."""
+        return (
+            query
+            .outerjoin(User, AnalyticsEvent.user_id == User.id)
+            .where(AnalyticsEvent.created_at >= thirty_min_ago)
+            .where(not_(func.lower(AnalyticsEvent.path).like("/admin%")))
+            .where(or_(User.id == None, User.is_platform_admin == False))
+        )
+
+    # ── 1. Active unique visitors in last 5 min ──
+    res_active = await db.execute(
+        apply_realtime_filters(
+            select(func.count(
+                func.distinct(func.coalesce(
+                    cast(AnalyticsEvent.user_id, String),
+                    AnalyticsEvent.ip_address
+                ))
+            ))
+        ).where(AnalyticsEvent.created_at >= five_min_ago)
+    )
+    active_users = res_active.scalar() or 0
+
+    # ── 2. 30-minute rolling window bucketed by minute ──
+    res_timeline = await db.execute(
+        apply_realtime_filters(
+            select(
+                func.date_trunc("minute", AnalyticsEvent.created_at).label("minute"),
+                func.count(func.distinct(func.coalesce(
+                    cast(AnalyticsEvent.user_id, String),
+                    AnalyticsEvent.ip_address
+                ))).label("cnt")
+            )
+        )
+        .group_by(func.date_trunc("minute", AnalyticsEvent.created_at))
+        .order_by(func.date_trunc("minute", AnalyticsEvent.created_at))
+    )
+    minute_buckets = {row.minute: row.cnt for row in res_timeline}
+
+    rolling = []
+    for i in range(30):
+        t = (thirty_min_ago + timedelta(minutes=i)).replace(second=0, microsecond=0)
+        rolling.append({
+            "time": t.strftime("%H:%M"),
+            "visitors": minute_buckets.get(t, 0)
+        })
+
+    # ── 3. Per-page views + unique visitors (last 30 min) ──
+    res_pages = await db.execute(
+        apply_realtime_filters(
+            select(
+                AnalyticsEvent.path,
+                func.count(AnalyticsEvent.id).label("total_views"),
+                func.count(func.distinct(func.coalesce(
+                    cast(AnalyticsEvent.user_id, String),
+                    AnalyticsEvent.ip_address
+                ))).label("unique_visitors")
+            )
+        )
+        .group_by(AnalyticsEvent.path)
+        .order_by(func.count(func.distinct(func.coalesce(
+            cast(AnalyticsEvent.user_id, String),
+            AnalyticsEvent.ip_address
+        ))).desc())
+        .limit(10)
+    )
+    top_pages = [
+        {"path": row[0] or "/", "views": row[1], "unique_visitors": row[2]}
+        for row in res_pages
+    ]
+
+    # ── 4. Live event feed: last 20 page views with device detection ──
+    res_feed = await db.execute(
+        select(
+            AnalyticsEvent.id,
+            AnalyticsEvent.path,
+            AnalyticsEvent.ip_address,
+            AnalyticsEvent.user_agent,
+            AnalyticsEvent.created_at,
+            AnalyticsEvent.user_id,
+            User.name.label("user_name"),
+        )
+        .outerjoin(User, AnalyticsEvent.user_id == User.id)
+        .where(AnalyticsEvent.created_at >= thirty_min_ago)
+        .where(not_(func.lower(AnalyticsEvent.path).like("/admin%")))
+        .where(or_(User.id == None, User.is_platform_admin == False))
+        .order_by(AnalyticsEvent.created_at.desc())
+        .limit(20)
+    )
+    live_feed = []
+    for row in res_feed:
+        ua = (row.user_agent or "").lower()
+        if "mobile" in ua or "android" in ua or "iphone" in ua:
+            device = "mobile"
+        elif "tablet" in ua or "ipad" in ua:
+            device = "tablet"
+        else:
+            device = "desktop"
+        delta = now - row.created_at.replace(tzinfo=None)
+        live_feed.append({
+            "id": str(row.id),
+            "path": row.path or "/",
+            "ip": row.ip_address,
+            "device": device,
+            "user_name": row.user_name,
+            "is_authenticated": row.user_id is not None,
+            "seconds_ago": int(delta.total_seconds()),
+            "timestamp": row.created_at.isoformat(),
+        })
+
+    # ── 5. Community breakdown (active tenants in last 5 min) ──
+    res_communities = await db.execute(
+        select(
+            AnalyticsEvent.tenant_id,
+            Tenant.name.label("tenant_name"),
+            func.count(func.distinct(func.coalesce(
+                cast(AnalyticsEvent.user_id, String),
+                AnalyticsEvent.ip_address
+            ))).label("active_count"),
+        )
+        .outerjoin(User, AnalyticsEvent.user_id == User.id)
+        .outerjoin(Tenant, AnalyticsEvent.tenant_id == Tenant.id)
+        .where(AnalyticsEvent.created_at >= five_min_ago)
+        .where(not_(func.lower(AnalyticsEvent.path).like("/admin%")))
+        .where(or_(User.id == None, User.is_platform_admin == False))
+        .where(AnalyticsEvent.tenant_id != None)
+        .group_by(AnalyticsEvent.tenant_id, Tenant.name)
+        .order_by(func.count(func.distinct(func.coalesce(
+            cast(AnalyticsEvent.user_id, String),
+            AnalyticsEvent.ip_address
+        ))).desc())
+        .limit(5)
+    )
+    community_breakdown = [
+        {
+            "tenant_id": str(row.tenant_id) if row.tenant_id else None,
+            "name": row.tenant_name or "Unknown Community",
+            "active": row.active_count,
+        }
+        for row in res_communities
+    ]
+
+    return {
+        "active_users": active_users,
+        "rolling_30min": rolling,
+        "top_pages_now": top_pages,
+        "live_feed": live_feed,
+        "community_breakdown": community_breakdown,
+        "as_of": now.isoformat()
+    }
+
 @router.get("/stats/analytics")
 async def get_analytics_stats(
     days: int = 7,
@@ -152,43 +320,33 @@ async def get_analytics_stats(
     # ── Base filter: exclude admin-panel paths AND platform-admin user visits ──
     # We join AnalyticsEvent with User so we can check is_platform_admin.
     # Events with no user_id are anonymous public visitors — always counted.
-    def base_filters():
-        """Return a list of WHERE conditions that exclude super-admin traffic."""
-        # Exclude any path that starts with /admin
-        admin_path_filter = not_(
-            func.lower(AnalyticsEvent.path).like("/admin%")
+    # ── Base filter logic (optimized) ──
+    from sqlalchemy import or_
+    def apply_base_filters(query):
+        return (
+            query
+            .outerjoin(User, AnalyticsEvent.user_id == User.id)
+            .where(AnalyticsEvent.created_at >= dt_start)
+            .where(not_(func.lower(AnalyticsEvent.path).like("/admin%")))
+            .where(or_(User.id == None, User.is_platform_admin == False))
         )
-        # Exclude events belonging to platform admins (left-join: NULL user_id is NOT an admin)
-        not_platform_admin = (
-            (AnalyticsEvent.user_id == None) |
-            (
-                select(User.id)
-                .where(
-                    User.id == AnalyticsEvent.user_id,
-                    User.is_platform_admin == True
-                )
-                .correlate(AnalyticsEvent)
-                .exists()
-                .is_(False)
-            )
-        )
-        return [AnalyticsEvent.created_at >= dt_start, admin_path_filter, not_platform_admin]
 
     # ── Timeline: unique visitor count per day ──
     from sqlalchemy import String, cast as sa_cast
     res = await db.execute(
-        select(
-            cast(AnalyticsEvent.created_at, Date).label("day"),
-            func.count(
-                func.distinct(
-                    func.coalesce(
-                        sa_cast(AnalyticsEvent.user_id, String),
-                        sa_cast(AnalyticsEvent.id, String)
+        apply_base_filters(
+            select(
+                cast(AnalyticsEvent.created_at, Date).label("day"),
+                func.count(
+                    func.distinct(
+                        func.coalesce(
+                            sa_cast(AnalyticsEvent.user_id, String),
+                            sa_cast(AnalyticsEvent.id, String)
+                        )
                     )
-                )
-            ).label("count")
+                ).label("count")
+            )
         )
-        .where(*base_filters())
         .group_by(cast(AnalyticsEvent.created_at, Date))
         .order_by(cast(AnalyticsEvent.created_at, Date))
     )
@@ -205,8 +363,9 @@ async def get_analytics_stats(
 
     # ── Location Breakdown (user visits only) ──
     res_loc = await db.execute(
-        select(AnalyticsEvent.location, func.count(AnalyticsEvent.id))
-        .where(*base_filters())
+        apply_base_filters(
+            select(AnalyticsEvent.location, func.count(AnalyticsEvent.id))
+        )
         .group_by(AnalyticsEvent.location)
         .order_by(func.count(AnalyticsEvent.id).desc())
         .limit(5)
@@ -214,23 +373,22 @@ async def get_analytics_stats(
     locations = [{"name": row[0] or "Unknown", "value": row[1]} for row in res_loc]
 
     # ── Top Pages: only real-user pages, counting each user once per path ──
-    # For authenticated users: count distinct user IDs
-    # For anonymous visitors: count distinct event IDs (each event = 1 unique visit)
     from sqlalchemy.dialects.postgresql import UUID as PG_UUID
     from sqlalchemy import String, cast as sa_cast
     res_pages = await db.execute(
-        select(
-            AnalyticsEvent.path,
-            func.count(
-                func.distinct(
-                    func.coalesce(
-                        sa_cast(AnalyticsEvent.user_id, String),
-                        sa_cast(AnalyticsEvent.id, String)
+        apply_base_filters(
+            select(
+                AnalyticsEvent.path,
+                func.count(
+                    func.distinct(
+                        func.coalesce(
+                            sa_cast(AnalyticsEvent.user_id, String),
+                            sa_cast(AnalyticsEvent.id, String)
+                        )
                     )
-                )
-            ).label("unique_visitors")
+                ).label("unique_visitors")
+            )
         )
-        .where(*base_filters())
         .group_by(AnalyticsEvent.path)
         .order_by(
             func.count(
@@ -648,21 +806,48 @@ async def get_platform_detailed_stats(
     admin: User = Depends(require_platform_admin),
 ):
     from sqlalchemy import func
-    import random
-    from datetime import datetime
+    from datetime import datetime, timedelta
+    
+    # 1. Provide a REAL timeline of platform activity over last 6 months
+    now = datetime.utcnow()
+    six_months_ago = now - timedelta(days=180)
     
     months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-    current_month_idx = datetime.utcnow().month - 1
     
+    # Query for monthly joins (new users)
+    new_users_res = await db.execute(
+        select(
+            func.date_trunc("month", User.created_at).label("month"),
+            func.count(User.id).label("cnt")
+        )
+        .where(User.created_at >= six_months_ago)
+        .group_by(func.date_trunc("month", User.created_at))
+        .order_by(func.date_trunc("month", User.created_at))
+    )
+    new_users_by_month = {row.month.month: row.cnt for row in new_users_res}
+
+    # Query for monthly actions (work orders + violations + arc)
+    wo_act_res = await db.execute(select(func.date_trunc("month", WorkOrder.created_at).label("m"), func.count(WorkOrder.id).label("c")).where(WorkOrder.created_at >= six_months_ago).group_by(func.date_trunc("month", WorkOrder.created_at)))
+    vi_act_res = await db.execute(select(func.date_trunc("month", Violation.created_at).label("m"), func.count(Violation.id).label("c")).where(Violation.created_at >= six_months_ago).group_by(func.date_trunc("month", Violation.created_at)))
+    ar_act_res = await db.execute(select(func.date_trunc("month", ArcRequest.created_at).label("m"), func.count(ArcRequest.id).label("c")).where(ArcRequest.created_at >= six_months_ago).group_by(func.date_trunc("month", ArcRequest.created_at)))
+    
+    activity_by_month = {}
+    for r in wo_act_res: activity_by_month[r.m.month] = activity_by_month.get(r.m.month, 0) + r.c
+    for r in vi_act_res: activity_by_month[r.m.month] = activity_by_month.get(r.m.month, 0) + r.c
+    for r in ar_act_res: activity_by_month[r.m.month] = activity_by_month.get(r.m.month, 0) + r.c
+
     timeline = []
+    current_month_idx = now.month - 1
     for i in range(7):
-        idx = (current_month_idx - 6 + i) % 12
+        target_date = now - timedelta(days=(6-i)*30)
+        m_idx = target_date.month
         timeline.append({
-            "name": months[idx],
-            "activities": random.randint(10, 100) + i * 15,
-            "newUsers": random.randint(1, 20) + i * 5,
+            "name": months[m_idx - 1],
+            "activities": activity_by_month.get(m_idx, 0),
+            "newUsers": new_users_by_month.get(m_idx, 0),
         })
 
+    # 2. Communities Table Data
     t_res = await db.execute(select(Tenant.id, Tenant.name, Tenant.slug, Tenant.status, Tenant.community_type))
     tenants = t_res.all()
     
@@ -679,8 +864,8 @@ async def get_platform_detailed_stats(
     a_res = await db.execute(select(ArcRequest.tenant_id, func.count(ArcRequest.id)).group_by(ArcRequest.tenant_id))
     arc_by_tenant = {row[0]: row[1] for row in a_res}
     
-    d_res = await db.execute(select(Document.tenant_id, func.count(Document.id)).group_by(Document.tenant_id))
-    docs_by_tenant = {row[0]: row[1] for row in d_res}
+    d_res = await db.execute(select(Document.tenant_id, func.count(Document.id), func.sum(Document.size_bytes)).group_by(Document.tenant_id))
+    docs_info_by_tenant = {row[0]: (row[1], row[2] or 0) for row in d_res}
     
     community_stats = []
     for t_id, t_name, t_slug, t_status, t_ctype in tenants:
@@ -688,9 +873,10 @@ async def get_platform_detailed_stats(
         w_count = workorders_by_tenant.get(t_id, 0)
         v_count = violations_by_tenant.get(t_id, 0)
         a_count = arc_by_tenant.get(t_id, 0)
-        d_count = docs_by_tenant.get(t_id, 0)
+        d_count, d_size = docs_info_by_tenant.get(t_id, (0, 0))
         
-        storage_mb = d_count * 1.8 + random.uniform(0.1, 5.0) if d_count > 0 else 0
+        # Real storage calculation
+        storage_mb = d_size / (1024 * 1024)
         
         community_stats.append({
             "id": str(t_id),

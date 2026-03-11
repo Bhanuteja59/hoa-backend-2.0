@@ -111,6 +111,39 @@ async def get_auth_ctx(
 
 
 
+async def get_platform_auth_ctx(
+    request: Request,
+    db: AsyncSession = Depends(get_db)
+) -> AuthContext:
+    """Special auth context for platform/admin routes that don't need a specific tenant."""
+    auth = request.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise AppError(code="AUTH_REQUIRED", message="Missing bearer token", status_code=401)
+
+    token = auth.split(" ", 1)[1]
+    payload = decode_access_token(token)
+    
+    if not payload.get("is_platform_admin"):
+        raise AppError(code="FORBIDDEN", message="Platform admin access required", status_code=403)
+
+    user_id = payload.get("sub")
+    
+    # 🔍 Verification
+    res = await db.execute(select(User.password_hash).where(User.id == user_id))
+    user_row = res.scalar_one_or_none()
+    if not user_row:
+        raise AppError(code="USER_NOT_FOUND", message="User no longer exists", status_code=401)
+        
+    if payload.get("pv") != user_row[:8]:
+        raise AppError(code="AUTH_CREDENTIALS_CHANGED", message="Credentials changed", status_code=401)
+
+    return AuthContext(
+        user_id=str(user_id),
+        tenant_id="00000000-0000-0000-0000-000000000000",
+        roles=["ADMIN", "*"],
+    )
+
+
 def require(permission: str):
     async def dep(ctx: AuthContext = Depends(get_auth_ctx)):
         # Platform admin / ADMIN - full access
