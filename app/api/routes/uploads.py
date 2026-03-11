@@ -11,7 +11,14 @@ router = APIRouter(prefix="/uploads", tags=["Uploads"])
 # Use absolute path for upload directory to avoid CWD issues
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+try:
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+except OSError:
+    # Fallback for serverless environments with read-only filesystems (e.g., Vercel, AWS Lambda)
+    UPLOAD_DIR = "/tmp/uploads"
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+
 
 @router.post("")
 async def upload_file(file: UploadFile = File(...)):
@@ -37,7 +44,10 @@ async def upload_file(file: UploadFile = File(...)):
         filepath = os.path.join(UPLOAD_DIR, secure_filename)
 
         # Ensure directory exists (redundant but safe)
-        os.makedirs(UPLOAD_DIR, exist_ok=True)
+        try:
+            os.makedirs(UPLOAD_DIR, exist_ok=True)
+        except OSError:
+            pass
 
         # Save the file
         with open(filepath, "wb") as buffer:
