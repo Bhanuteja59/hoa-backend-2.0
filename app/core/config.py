@@ -75,6 +75,8 @@ class Settings(BaseSettings):
         "https://hoa-frontend-beryl.vercel.app",
         "https://hoa-frontend-three.vercel.app",
         "https://hoa-frontend-2-0.vercel.app",
+        "https://hoa-superadmin.vercel.app",
+        "http://hoa-superadmin.vercel.app",
     ]
 
     # Chatbot
