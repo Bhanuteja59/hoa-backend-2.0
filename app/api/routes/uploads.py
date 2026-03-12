@@ -1,30 +1,21 @@
-import os
-import shutil
 import uuid
-from typing import Optional
-from fastapi import APIRouter, UploadFile, File, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from app.core.config import settings
+from app.services.cloudinary_service import cloudinary_service
+from app.api.deps import get_tenant_ctx
+from app.core.tenant import TenantContext
 
 router = APIRouter(prefix="/uploads", tags=["Uploads"])
 
-# Use absolute path for upload directory to avoid CWD issues
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
-
-try:
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
-except OSError:
-    # Fallback for serverless environments with read-only filesystems (e.g., Vercel, AWS Lambda)
-    UPLOAD_DIR = "/tmp/uploads"
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-
 @router.post("")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(
+    file: UploadFile = File(...),
+    tenant: TenantContext = Depends(get_tenant_ctx)
+):
     """
-    Saves a file to the local uploads directory and returns the relative URL.
+    Uploads a file to Cloudinary and returns the secure URL.
     Used for attachments in Work Orders, ARC requests, and Violations.
+    Organizes files by tenant slug.
     """
     try:
         # Validate filename
@@ -34,31 +25,34 @@ async def upload_file(file: UploadFile = File(...)):
         filename_str = str(file.filename)
         ext = filename_str.split(".")[-1].lower() if "." in filename_str else "bin"
         
-        # Allowed extensions (broadened to be safe)
+        # Allowed extensions
         allowed = ["jpg", "jpeg", "png", "gif", "pdf", "doc", "docx", "xls", "xlsx", "txt", "csv"]
         if ext not in allowed:
             raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}")
 
-        # Generate unique filename to avoid collisions and directory traversal
-        secure_filename = f"{uuid.uuid4().hex}.{ext}"
-        filepath = os.path.join(UPLOAD_DIR, secure_filename)
-
-        # Ensure directory exists (redundant but safe)
-        try:
-            os.makedirs(UPLOAD_DIR, exist_ok=True)
-        except OSError:
-            pass
-
-        # Save the file
-        with open(filepath, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-
-        # Return the relative path which is served via StaticFiles mount
-        url = f"/uploads/{secure_filename}"
+        # Read file content
+        content = await file.read()
         
+        # Determine resource type for Cloudinary
+        resource_type = "image" if ext in ["jpg", "jpeg", "png", "gif"] else "raw"
+        
+        # Upload to Cloudinary
+        # Folder structure: hoa/{tenant_slug}/uploads
+        folder = f"{tenant.slug}/uploads"
+        
+        result = await cloudinary_service.upload_file(
+            file_content=content,
+            filename=filename_str,
+            folder=folder,
+            resource_type=resource_type
+        )
+        
+        if result["status"] == "error":
+            raise HTTPException(status_code=500, detail=f"Cloudinary upload failed: {result['message']}")
+
         return {
-            "url": url, 
-            "filename": secure_filename, 
+            "url": result["url"], 
+            "filename": result["public_id"], 
             "original_name": file.filename,
             "status": "success"
         }

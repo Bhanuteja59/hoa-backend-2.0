@@ -52,17 +52,9 @@ def setup_cors(app: FastAPI):
         expose_headers=["*", "x-request-id"],
     )
 
-# Mount Uploads
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ABS_UPLOAD_DIR = os.path.join(BASE_DIR, "..", "uploads")
-
-try:
-    os.makedirs(ABS_UPLOAD_DIR, exist_ok=True)
-except OSError:
-    # Fallback for serverless environments with read-only filesystems (e.g., Vercel, AWS Lambda)
-    ABS_UPLOAD_DIR = "/tmp/uploads"
-    os.makedirs(ABS_UPLOAD_DIR, exist_ok=True)
-
+# Mount Uploads (Legacy support for local dev, safe for Vercel)
+ABS_UPLOAD_DIR = "/tmp/uploads"
+os.makedirs(ABS_UPLOAD_DIR, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=ABS_UPLOAD_DIR), name="uploads")
 
 @app.middleware("http")
