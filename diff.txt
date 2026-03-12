@@ -1,0 +1,30 @@
+﻿diff --git a/app/api/routes/platform.py b/app/api/routes/platform.py
+index 8fd9e79..437d974 100644
+--- a/app/api/routes/platform.py
++++ b/app/api/routes/platform.py
+@@ -123,6 +123,14 @@ async def track_analytics(
+     if ip not in ("127.0.0.1", "::1", "localhost"):
+         location = "Remote Visitor"
+ 
++    def safe_uuid(v: str | None) -> UUID | None:
++        if not v or v.lower() in ("null", "undefined", "none", ""):
++            return None
++        try:
++            return UUID(v)
++        except (ValueError, TypeError):
++            return None
++
+     event = AnalyticsEvent(
+         id=uuid.uuid4(),
+         event_type=payload.event_type,
+@@ -131,8 +139,8 @@ async def track_analytics(
+         user_agent=payload.user_agent or request.headers.get("user-agent"),
+         ip_address=ip,
+         location=location,
+-        tenant_id=UUID(payload.tenant_id) if payload.tenant_id else None,
+-        user_id=UUID(user_id) if user_id else None,
++        tenant_id=safe_uuid(payload.tenant_id),
++        user_id=safe_uuid(user_id),
+         session_id=payload.session_id,
+         created_at=datetime.utcnow()
+     )
