@@ -20,4 +20,6 @@ fastembed
 pypdf
 duckduckgo-search
 httpx
-stripe
+stripe
+cloudinary
+

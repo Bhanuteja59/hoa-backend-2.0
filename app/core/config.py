@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     # File uploads
     UPLOAD_DIR: str = "uploads"
     MAX_UPLOAD_MB: int = 20
+    CLOUDINARY_CLOUD_NAME: str | None = None
+    CLOUDINARY_API_KEY: str | None = None
+    CLOUDINARY_API_SECRET: str | None = None
+    CLOUDINARY_URL: str | None = None
 
     # Frontend Host (for invitation links)
     NEXTAUTH_URL: str = "http://localhost:3000"
