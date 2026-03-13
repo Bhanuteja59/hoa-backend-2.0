@@ -12,6 +12,7 @@ class RAGService:
         self.qdrant = QdrantClient(
             url=settings.QDRANT_URL,
             api_key=settings.QDRANT_API_KEY,
+            timeout=20.0,
         )
         self.collection_name = settings.QDRANT_COLLECTION
         self._ensure_collection()
@@ -34,8 +35,11 @@ class RAGService:
     def embedding_model(self):
         """Lazy-load the embedding model only when needed"""
         if self._embedding_model is None:
+            import os
             from fastembed import TextEmbedding
-            self._embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+            cache_dir = "/tmp/fastembed_cache"
+            os.makedirs(cache_dir, exist_ok=True)
+            self._embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5", cache_dir=cache_dir)
         return self._embedding_model
 
     def _ensure_collection(self):
@@ -135,7 +139,7 @@ class RAGService:
                     points=points
                 )
             except Exception as e:
-                pass
+                print(f"Qdrant Upsert Error: {e}")
 
 
     async def query(self, tenant_id: str, question: str, history: list[dict], db: "AsyncSession", user_ctx: "AuthContext") -> str:
