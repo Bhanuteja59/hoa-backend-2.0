@@ -21,3 +21,4 @@ duckduckgo-search
 httpx
 stripe
 cloudinary
+websockets

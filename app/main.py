@@ -30,6 +30,7 @@ from app.api.routes import (
     chatbot,
     uploads,
     payments,
+    notifications,
 )
 from fastapi.staticfiles import StaticFiles
 
@@ -39,6 +40,10 @@ configure_logging()
 
 
 app = FastAPI(title="HOA SaaS API", version="1.0.0")
+
+# Debug: Verify Stripe Key on Startup
+masked_key = f"{settings.STRIPE_SECRET_KEY[:8]}...{settings.STRIPE_SECRET_KEY[-4:]}" if settings.STRIPE_SECRET_KEY else "Missing"
+print(f"DEBUG: Using Stripe Secret Key: {masked_key}")
 
 # CORS Middleware (placed down to be Outer)
 def setup_cors(app: FastAPI):
@@ -142,3 +147,4 @@ app.include_router(platform.router, prefix="/api/v1/admin")
 app.include_router(chatbot.router, prefix="/api/v1")
 app.include_router(uploads.router, prefix="/api/v1")
 app.include_router(payments.router, prefix="/api/v1/payments")
+app.include_router(notifications.router, prefix="/api/v1/notifications")

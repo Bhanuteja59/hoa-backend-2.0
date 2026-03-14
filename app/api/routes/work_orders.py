@@ -41,15 +41,21 @@ async def create_work_order(
     ctx: AuthContext = Depends(require("work_orders:write")),
 ):
     unit_id = payload.unit_id
-    if "USER" in ctx.roles:
-        tu = (await db.execute(select(TenantUser).where(
-            TenantUser.tenant_id == UUID(tenant.tenant_id), TenantUser.user_id == UUID(ctx.user_id)
-        ))).scalar_one_or_none()
-        if not tu or not tu.unit_id:
-            raise AppError(code="UNIT_MISSING", message="Resident unit not configured", status_code=400)
-        unit_id = str(tu.unit_id)
+    is_privileged = any(r in ctx.roles for r in ["ADMIN", "BOARD", "BOARD_MEMBER", "*"])
+
+    # Fallback: If no unit_id provided, try to use the user's own unit if they are a resident
+    if not unit_id and "USER" in ctx.roles:
+        res = await db.execute(select(TenantUser.unit_id).where(
+            TenantUser.tenant_id == UUID(tenant.tenant_id),
+            TenantUser.user_id == UUID(ctx.user_id)
+        ))
+        row = res.scalar_one_or_none()
+        if row:
+            unit_id = str(row)
 
     if not unit_id:
+        if not is_privileged:
+            raise AppError(code="UNIT_MISSING", message="Resident unit not configured", status_code=400)
         raise AppError(code="UNIT_REQUIRED", message="unit_id required", status_code=400)
 
     now = datetime.now(timezone.utc)

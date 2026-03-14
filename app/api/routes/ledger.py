@@ -13,8 +13,9 @@ from app.api.deps import get_db, get_tenant_ctx, require
 from app.core.tenant import TenantContext
 from app.core.rbac import AuthContext
 from app.core.errors import AppError
-from app.db.models import Charge, Payment, TenantUser
+from app.db.models import Charge, Payment, TenantUser, Notification
 from app.services.ledger import recompute_balance_cents
+from app.services.notifications import notification_manager
 
 router = APIRouter(prefix="/ledger", tags=["ledger"])
 
@@ -125,6 +126,27 @@ async def create_charge(
     )
     db.add(c)
     await recompute_balance_cents(db, tenant_id=tenant.tenant_id, unit_id=payload.unit_id)
+    
+    # Notify unit residents
+    res = await db.execute(
+        select(TenantUser.user_id).where(
+            TenantUser.tenant_id == UUID(tenant.tenant_id),
+            TenantUser.unit_id == UUID(payload.unit_id)
+        )
+    )
+    user_ids = res.scalars().all()
+    for uid in user_ids:
+        n = Notification(
+            tenant_id=UUID(tenant.tenant_id),
+            user_id=uid,
+            title="New Charge Posted",
+            message=f"A new charge of ${payload.amount_cents/100:.2f} for '{payload.description}' has been added to your account.",
+            type="payment",
+            link="/dashboard/dues-ledger"
+        )
+        db.add(n)
+        await notification_manager.notify_user(uid, n.title, n.message, n.type, n.link)
+
     await db.commit()
     return {"id": str(c.id)}
 
@@ -148,5 +170,67 @@ async def record_payment(
     )
     db.add(p)
     await recompute_balance_cents(db, tenant_id=tenant.tenant_id, unit_id=payload.unit_id)
+    
+    # Notify unit residents (if recorded by admin)
+    if "ADMIN" in ctx.roles or "BOARD" in ctx.roles:
+        res = await db.execute(
+            select(TenantUser.user_id).where(
+                TenantUser.tenant_id == UUID(tenant.tenant_id),
+                TenantUser.unit_id == UUID(payload.unit_id)
+            )
+        )
+        user_ids = res.scalars().all()
+        for uid in user_ids:
+            # Don't notify the person who made the payment if they are a resident? 
+            # Actually, usually admin records it so we notify residents.
+            n = Notification(
+                tenant_id=UUID(tenant.tenant_id),
+                user_id=uid,
+                title="Payment Recorded",
+                message=f"A payment of ${payload.amount_cents/100:.2f} has been credited to your account.",
+                type="payment",
+                link="/dashboard/dues-ledger"
+            )
+            db.add(n)
+            await notification_manager.notify_user(uid, n.title, n.message, n.type, n.link)
+
     await db.commit()
     return {"id": str(p.id)}
+
+@router.get("/summary")
+async def get_ledger_summary(
+    db: AsyncSession = Depends(get_db),
+    tenant: TenantContext = Depends(get_tenant_ctx),
+    ctx: AuthContext = Depends(require("ledger:read")),
+):
+    """
+    Get all units and their balances for the tenant.
+    Only accessible to non-USER roles (ADMIN, BOARD, etc).
+    """
+    # Only Admin/Board should see the full summary
+    is_admin_or_board = any(r in ctx.roles for r in ["ADMIN", "BOARD", "BOARD_MEMBER"])
+    if not is_admin_or_board:
+         raise AppError(code="FORBIDDEN", message="Only administrative users can access the ledger summary", status_code=403)
+
+    from app.db.models import Unit, LedgerAccount, Building
+    
+    stmt = (
+        select(Unit, LedgerAccount.balance_cents, Building.name)
+        .outerjoin(LedgerAccount, Unit.id == LedgerAccount.unit_id)
+        .outerjoin(Building, Unit.building_id == Building.id)
+        .where(Unit.tenant_id == UUID(tenant.tenant_id))
+        .order_by(Building.name, Unit.unit_number)
+    )
+    
+    res = await db.execute(stmt)
+    rows = res.all()
+    
+    return [
+        {
+            "unit_id": str(u.id),
+            "unit_number": u.unit_number,
+            "building_name": b_name,
+            "balance_cents": bal if bal is not None else 0
+        }
+        for u, bal, b_name in rows
+    ]
