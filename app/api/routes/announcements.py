@@ -13,8 +13,9 @@ from app.api.deps import get_db, get_tenant_ctx, require
 from app.core.tenant import TenantContext
 from app.core.rbac import AuthContext
 from app.core.errors import AppError
-from app.db.models import Announcement
+from app.db.models import Announcement, TenantUser, Notification
 from sqlalchemy import delete, update
+from app.services.notifications import notification_manager
 
 router = APIRouter(prefix="/announcements", tags=["announcements"])
 
@@ -45,6 +46,29 @@ async def create_announcement(
         created_at=now,
     )
     db.add(a)
+    
+    # Notify appropriate audience
+    if payload.publish:
+        stmt = select(TenantUser.user_id).where(
+            TenantUser.tenant_id == UUID(tenant.tenant_id),
+            TenantUser.status == "active"
+        )
+        res = await db.execute(stmt)
+        user_ids = res.scalars().all()
+        for uid in user_ids:
+            if uid == UUID(ctx.user_id): continue
+            
+            n = Notification(
+                tenant_id=UUID(tenant.tenant_id),
+                user_id=uid,
+                title="Community Announcement",
+                message=payload.title,
+                type="announcement",
+                link="/dashboard"
+            )
+            db.add(n)
+            await notification_manager.notify_user(uid, n.title, n.message, n.type, n.link)
+
     await db.commit()
     return {"id": str(a.id)}
 

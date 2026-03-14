@@ -161,6 +161,7 @@ def require(permission: str):
                 "violations:write", "arc:write", "work_orders:write",
                 "docs:write", "announcements:write",
                 "units:read", "search:read",
+                "notifications:read", "notifications:write",
             ]:
                 return ctx
 
@@ -174,6 +175,7 @@ def require(permission: str):
                 "announcements:read",
                 "search:read",
                 "units:read",
+                "notifications:read", "notifications:write",
             ]:
                 return ctx
 

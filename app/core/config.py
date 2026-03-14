@@ -90,8 +90,9 @@ class Settings(BaseSettings):
     QDRANT_COLLECTION: str = "community_docs"
 
     # Stripe
-    STRIPE_API_KEY: str = "sk_test_..."
-    STRIPE_PUBLIC_KEY: str = "pk_test_..."
+    STRIPE_SECRET_KEY: str = "sk_test_placeholder"
+    STRIPE_PUBLIC_KEY: str = "pk_test_placeholder"
+    STRIPE_WEBHOOK_SECRET: str = "whsec_placeholder"
 
     # SMTP (Email)
     SMTP_SERVER: str | None = None

@@ -5,7 +5,7 @@ import mimetypes
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, UploadFile, File, Form, Query
+from fastapi import APIRouter, Depends, UploadFile, File, Form, Query, Response
 from pydantic import BaseModel
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,9 +14,10 @@ from app.api.deps import get_db, get_tenant_ctx, require, get_auth_ctx
 from app.core.tenant import TenantContext
 from app.core.rbac import AuthContext
 from app.core.errors import AppError
-from app.db.models import Document, DocumentFolder
+from app.db.models import Document, DocumentFolder, TenantUser, Notification
 from app.services.storage import Storage
 from app.services.cloudinary_service import cloudinary_service
+from app.services.notifications import notification_manager
 from app.core.rag import rag_service
 from sqlalchemy.orm import undefer
 
@@ -339,6 +340,29 @@ async def upload_document(
         created_at=datetime.now(timezone.utc),
     )
     db.add(doc)
+    
+    # Notify residents if document is visible to them
+    if acl == "RESIDENT_VISIBLE":
+        # Find all active residents/board in this tenant (excluding platform admins)
+        stmt = select(TenantUser.user_id).where(
+            TenantUser.tenant_id == UUID(tenant.tenant_id),
+            TenantUser.status == "active"
+        )
+        res = await db.execute(stmt)
+        user_ids = res.scalars().all()
+        for uid in user_ids:
+            if uid == UUID(ctx.user_id): continue # Skip uploader
+            n = Notification(
+                tenant_id=UUID(tenant.tenant_id),
+                user_id=uid,
+                title="New Document Available",
+                message=f"A new document '{title}' has been shared with the community.",
+                type="document",
+                link="/dashboard/documents"
+            )
+            db.add(n)
+            await notification_manager.notify_user(uid, n.title, n.message, n.type, n.link)
+
     await db.commit()
 
     return DocumentOut(
@@ -491,7 +515,7 @@ async def view_document_with_token(
 ):
     """View a document using a temporary token (bypass standard auth)."""
     from app.core.config import settings
-    from jose import jwt
+    from jose import jwt, JWTError
     from fastapi.responses import Response
     import os
 
@@ -513,6 +537,7 @@ async def view_document_with_token(
     if str(d.tenant_id) != token_tenant_id:
         raise AppError(code="NO_PERMISSION", message="Tenant mismatch", status_code=403)
 
+    # Serve directly from DB content if stored as blob
     if d.content:
         return Response(
             content=d.content,
@@ -522,9 +547,84 @@ async def view_document_with_token(
 
     if d.storage_key:
         if d.storage_key.startswith("http"):
-            from fastapi.responses import RedirectResponse
-            return RedirectResponse(d.storage_key)
-            
+            import time
+            import httpx
+            import cloudinary.utils
+            from fastapi.responses import StreamingResponse
+
+            storage_url = d.storage_key
+            fetch_url = storage_url  # may be replaced with signed URL
+
+            if "cloudinary.com" in storage_url:
+                try:
+                    r_type = "raw" if "/raw/" in storage_url else "image"
+
+                    # Extract public_id from the Cloudinary URL
+                    parts = storage_url.split("upload/")
+                    if len(parts) > 1:
+                        after_upload = parts[1].split("/", 1)
+                        # Skip version segment like "v1741948332"
+                        if (after_upload[0].startswith("v")
+                                and after_upload[0][1:].isdigit()
+                                and len(after_upload) > 1):
+                            p_id = after_upload[1]
+                        else:
+                            p_id = "/".join(after_upload)
+
+                        # Image public_ids don't include extension; raw files do
+                        if r_type == "image" and "." in p_id.split("/")[-1]:
+                            p_id = p_id.rsplit(".", 1)[0]
+
+                        # Generate signed URL valid for 1 hour
+                        signed_url, _ = cloudinary.utils.cloudinary_url(
+                            p_id,
+                            resource_type=r_type,
+                            type="upload",
+                            secure=True,
+                            sign_url=True,
+                            expires_at=int(time.time()) + 3600,
+                        )
+                        fetch_url = signed_url
+                except Exception as sign_err:
+                    print(f"Cloudinary URL signing failed: {sign_err}, trying unsigned URL")
+
+            # Proxy the file back to the browser so we control the Content-Type.
+            # This is essential — Cloudinary raw files are served as application/octet-stream,
+            # which browsers won't render inline. We force the correct MIME type from the DB.
+            try:
+                async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+                    async with client.stream("GET", fetch_url) as resp:
+                        if resp.status_code != 200:
+                            raise AppError(
+                                code="FILE_NOT_FOUND",
+                                message=f"Cloud storage returned {resp.status_code}",
+                                status_code=502,
+                            )
+
+                        # Use the mime_type from DB (reliable) not from Cloudinary headers
+                        content_type = d.mime_type or resp.headers.get("content-type", "application/octet-stream")
+
+                        headers = {
+                            "Content-Disposition": f'inline; filename="{d.filename}"',
+                            "Cache-Control": "private, max-age=3600",
+                        }
+                        cl = resp.headers.get("content-length")
+                        if cl:
+                            headers["Content-Length"] = cl
+
+                        # We must read all content before the context manager closes
+                        content = await resp.aread()
+
+                return Response(
+                    content=content,
+                    media_type=content_type,
+                    headers=headers,
+                )
+            except AppError:
+                raise
+            except Exception as e:
+                raise AppError(code="PROXY_ERROR", message=f"Failed to fetch document: {e}", status_code=502)
+
         from fastapi.responses import FileResponse
         storage = Storage()
         path = storage.get_path(d.storage_key)
@@ -532,3 +632,4 @@ async def view_document_with_token(
             return FileResponse(path, media_type=d.mime_type, filename=d.filename, content_disposition_type="inline")
 
     raise AppError(code="FILE_NOT_FOUND", message="Document content not found", status_code=404)
+
