@@ -1081,6 +1081,89 @@ async def get_tenant(
         created_at=tenant.created_at
     )
 
+
+@router.get("/tenants/{tenant_id}/ledger/summary")
+async def get_tenant_ledger_summary(
+    tenant_id: str,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_platform_admin),
+):
+    """Super-admin ledger summary for all units in a tenant."""
+    from app.db.models import Unit, LedgerAccount, Building
+
+    stmt = (
+        select(Unit, LedgerAccount.balance_cents, Building.name)
+        .outerjoin(LedgerAccount, Unit.id == LedgerAccount.unit_id)
+        .outerjoin(Building, Unit.building_id == Building.id)
+        .where(Unit.tenant_id == UUID(tenant_id))
+        .order_by(Building.name, Unit.unit_number)
+    )
+    res = await db.execute(stmt)
+    rows = res.all()
+
+    return [
+        {
+            "unit_id": str(u.id),
+            "unit_number": u.unit_number,
+            "building_name": b_name,
+            "balance_cents": bal if bal is not None else 0,
+        }
+        for u, bal, b_name in rows
+    ]
+
+
+@router.get("/tenants/{tenant_id}/ledger/history")
+async def get_tenant_ledger_history(
+    tenant_id: str,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_platform_admin),
+):
+    """Super-admin ledger transaction history across a tenant."""
+    from app.db.models import Charge, Payment, Unit, Building
+
+    tid = UUID(tenant_id)
+
+    charges = (await db.execute(
+        select(Charge, Unit.unit_number, Building.name)
+        .join(Unit, Charge.unit_id == Unit.id)
+        .outerjoin(Building, Unit.building_id == Building.id)
+        .where(Charge.tenant_id == tid)
+    )).all()
+
+    payments = (await db.execute(
+        select(Payment, Unit.unit_number, Building.name)
+        .join(Unit, Payment.unit_id == Unit.id)
+        .outerjoin(Building, Unit.building_id == Building.id)
+        .where(Payment.tenant_id == tid)
+    )).all()
+
+    transactions = []
+    for c, unit_number, building_name in charges:
+        transactions.append({
+            "id": str(c.id),
+            "type": "CHARGE",
+            "unit_id": str(c.unit_id),
+            "unit_number": unit_number,
+            "building_name": building_name,
+            "amount_cents": c.amount_cents,
+            "description": c.description,
+            "posted_at": c.posted_at,
+        })
+    for p, unit_number, building_name in payments:
+        transactions.append({
+            "id": str(p.id),
+            "type": "PAYMENT",
+            "unit_id": str(p.unit_id),
+            "unit_number": unit_number,
+            "building_name": building_name,
+            "amount_cents": p.amount_cents,
+            "description": f"Payment: {p.method}" + (f" ({p.reference})" if p.reference else ""),
+            "posted_at": p.posted_at,
+        })
+
+    transactions.sort(key=lambda x: x["posted_at"], reverse=True)
+    return transactions
+
 @router.put("/tenants/{tenant_id}")
 async def update_tenant(
     tenant_id: str,

@@ -99,7 +99,7 @@ async def get_history(
         transactions.append({
             "id": str(p.id),
             "type": "PAYMENT",
-            "amount_cents": -p.amount_cents, # Negate payment amount for display
+            "amount_cents": p.amount_cents, # stored positive; UI formats with a leading '-' for payments
             "description": f"Payment: {p.method}" + (f" ({p.reference})" if p.reference else ""),
             "posted_at": p.posted_at
         })
