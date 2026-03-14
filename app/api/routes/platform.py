@@ -17,6 +17,9 @@ from datetime import datetime
 from uuid import UUID
 import uuid
 
+from app.services.cloudinary_service import cloudinary_service
+from app.core.rag import rag_service
+
 router = APIRouter(tags=["platform"])
 
 class TenantOut(BaseModel):
@@ -147,6 +150,57 @@ async def track_analytics(
     db.add(event)
     await db.commit()
     return {"ok": True}
+
+@router.get("/stats/health")
+async def get_system_health(
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_platform_admin),
+):
+    from sqlalchemy import text
+    from fastapi.concurrency import run_in_threadpool
+    import asyncio
+    
+    health = {
+        "api": "Operational",
+        "api_ok": True,
+        "database": "Checking...",
+        "database_ok": False,
+        "auth": "Operational",
+        "auth_ok": True,
+        "storage": "Checking...",
+        "storage_ok": False,
+        "qdrant": "Checking...",
+        "qdrant_ok": False,
+    }
+    
+    # 1. Database
+    try:
+        await db.execute(text("SELECT 1"))
+        health["database"] = "Operational"
+        health["database_ok"] = True
+    except Exception as e:
+        health["database"] = "Failed"
+
+    # 2. Storage (Cloudinary)
+    try:
+        import cloudinary.api
+        await run_in_threadpool(cloudinary.api.ping)
+        health["storage"] = "Operational"
+        health["storage_ok"] = True
+    except Exception:
+        health["storage"] = "Failed"
+
+    # 3. AI Vector Database (Qdrant)
+    try:
+        from app.core.rag import rag_service
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, rag_service.qdrant.get_collections)
+        health["qdrant"] = "Operational"
+        health["qdrant_ok"] = True
+    except Exception:
+        health["qdrant"] = "Failed"
+        
+    return health
 
 @router.get("/stats/realtime")
 async def get_realtime_stats(
@@ -1064,6 +1118,21 @@ async def delete_tenant(
     await db.execute(delete(UserContact).where(UserContact.tenant_id == tid))
     await db.execute(delete(Hearing).where(Hearing.tenant_id == tid))
     await db.execute(delete(ViolationNotice).where(ViolationNotice.tenant_id == tid))
+
+    # 1.5. Clean up associated files from Cloudinary and Qdrant before deleting DB records
+    docs_to_delete_res = await db.execute(select(Document).where(Document.tenant_id == tid))
+    docs_to_delete = docs_to_delete_res.scalars().all()
+    for doc in docs_to_delete:
+        if doc.storage_key and doc.storage_key.startswith("http"):
+            try:
+                await cloudinary_service.delete_file_by_url(doc.storage_key)
+            except Exception as e:
+                print(f"Platform Admin: Failed to delete {doc.storage_key} from Cloudinary: {e}")
+        try:
+            if doc.filename and doc.filename.lower().endswith((".pdf", ".txt")):
+                await rag_service.delete_document(str(tid), doc.filename)
+        except Exception as e:
+            print(f"Platform Admin: Failed to delete {doc.filename} from Qdrant: {e}")
 
     # 2. Primary ancillary tables
     await db.execute(delete(Document).where(Document.tenant_id == tid))

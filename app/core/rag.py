@@ -128,6 +128,25 @@ class RAGService:
             except Exception as e:
                 print(f"Qdrant Upsert Error: {e}")
 
+    async def delete_document(self, tenant_id: str, filename: str):
+        # Offload blocking CPU/IO work to a thread
+        import asyncio
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._delete_sync, tenant_id, filename)
+
+    def _delete_sync(self, tenant_id: str, filename: str):
+        try:
+            self.qdrant.delete(
+                collection_name=self.collection_name,
+                points_selector=models.Filter(
+                    must=[
+                        models.FieldCondition(key="tenant_id", match=models.MatchValue(value=str(tenant_id))),
+                        models.FieldCondition(key="filename", match=models.MatchValue(value=filename))
+                    ]
+                )
+            )
+        except Exception as e:
+            print(f"Qdrant Delete Error: {e}")
 
     async def query(self, tenant_id: str, question: str, history: list[dict], db: "AsyncSession", user_ctx: "AuthContext") -> str:
         # Quick greeting check

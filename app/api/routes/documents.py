@@ -16,6 +16,8 @@ from app.core.rbac import AuthContext
 from app.core.errors import AppError
 from app.db.models import Document, DocumentFolder
 from app.services.storage import Storage
+from app.services.cloudinary_service import cloudinary_service
+from app.core.rag import rag_service
 from sqlalchemy.orm import undefer
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -170,11 +172,28 @@ async def delete_folder(
     # Recursively collect all subfolder IDs to delete
     all_folder_ids = await _collect_folder_ids(db, UUID(tenant.tenant_id), folder_uuid)
 
-    # Delete all documents in these folders
-    await db.execute(delete(Document).where(
+    # Delete all documents in these folders (and clean up cloud/AI)
+    docs_to_delete_res = await db.execute(select(Document).where(
         Document.tenant_id == UUID(tenant.tenant_id),
         Document.folder_id.in_(all_folder_ids)
     ))
+    docs_to_delete = docs_to_delete_res.scalars().all()
+    
+    for doc in docs_to_delete:
+        # Delete from Cloudinary
+        if doc.storage_key and doc.storage_key.startswith("http"):
+            try:
+                await cloudinary_service.delete_file_by_url(doc.storage_key)
+            except Exception:
+                pass
+        # Delete from Qdrant
+        try:
+            if doc.filename.lower().endswith((".pdf", ".txt")):
+                await rag_service.delete_document(tenant.tenant_id, doc.filename)
+        except Exception:
+            pass
+            
+        await db.delete(doc)
 
     # Delete subfolders (deepest first — delete all at once since SQLAlchemy handles FK order)
     for fid in all_folder_ids:
@@ -276,6 +295,35 @@ async def upload_document(
         if guessed:
             mime_type = guessed
 
+    # 1. Upload to Cloudinary
+    storage_key = f"db:{file.filename}"
+    doc_content = content
+    try:
+        folder = f"{tenant.slug}/documents"
+        c_res = await cloudinary_service.upload_file(
+            file_content=content,
+            filename=file.filename,
+            folder=folder,
+            resource_type="auto"
+        )
+        if c_res.get("status") == "success":
+            storage_key = c_res.get("url")
+            doc_content = None # Not saving blob to DB if we successfully used Cloudinary
+    except Exception as e:
+        print(f"Cloudinary fallback error: {e}")
+
+    # 2. Add to Chatbot (rag_service)
+    try:
+        if file.filename.lower().endswith(".pdf") or file.filename.lower().endswith(".txt"):
+            await rag_service.ingest_document(
+                tenant_id=tenant.tenant_id,
+                filename=file.filename,
+                content=content,
+                mime_type=mime_type or "application/octet-stream"
+            )
+    except Exception as e:
+        print(f"RAG ingest error: {e}")
+
     doc = Document(
         id=uuid4(),
         tenant_id=UUID(tenant.tenant_id),
@@ -284,8 +332,8 @@ async def upload_document(
         mime_type=mime_type or "application/octet-stream",
         size_bytes=file_size,
         acl=acl,
-        storage_key=f"db:{file.filename}",
-        content=content,
+        storage_key=storage_key,
+        content=doc_content,
         folder_id=folder_uuid,
         created_by_user_id=UUID(ctx.user_id),
         created_at=datetime.now(timezone.utc),
@@ -375,6 +423,20 @@ async def delete_document(
     if not d:
         raise AppError(code="NOT_FOUND", message="Document not found", status_code=404)
 
+    # 1. Delete from Cloudinary if it's stored there
+    if d.storage_key and d.storage_key.startswith("http"):
+        try:
+            await cloudinary_service.delete_file_by_url(d.storage_key)
+        except Exception as e:
+            print(f"Failed to delete {d.storage_key} from Cloudinary: {e}")
+            
+    # 2. Delete from Qdrant Chatbot
+    try:
+        if d.filename.lower().endswith((".pdf", ".txt")):
+            await rag_service.delete_document(tenant.tenant_id, d.filename)
+    except Exception as e:
+        print(f"Failed to delete {d.filename} from Qdrant: {e}")
+
     await db.delete(d)
     await db.commit()
     return {"ok": True}
@@ -459,6 +521,10 @@ async def view_document_with_token(
         )
 
     if d.storage_key:
+        if d.storage_key.startswith("http"):
+            from fastapi.responses import RedirectResponse
+            return RedirectResponse(d.storage_key)
+            
         from fastapi.responses import FileResponse
         storage = Storage()
         path = storage.get_path(d.storage_key)
