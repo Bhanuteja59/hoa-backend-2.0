@@ -4,7 +4,6 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from openai import OpenAI
 from app.core.config import settings
-from fastembed import TextEmbedding
 import io
 
 class RAGService:
@@ -28,19 +27,7 @@ class RAGService:
             max_retries=2,
         )
         
-        # Lazy-load embedding model to reduce startup memory
-        self._embedding_model = None
-
-    @property
-    def embedding_model(self):
-        """Lazy-load the embedding model only when needed"""
-        if self._embedding_model is None:
-            import os
-            from fastembed import TextEmbedding
-            cache_dir = "/tmp/fastembed_cache"
-            os.makedirs(cache_dir, exist_ok=True)
-            self._embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5", cache_dir=cache_dir)
-        return self._embedding_model
+        # Using OpenAI for embeddings instead of fastembed
 
     def _ensure_collection(self):
         try:
@@ -55,7 +42,7 @@ class RAGService:
             elif isinstance(vectors_config, dict) and "size" in vectors_config:
                 size = vectors_config["size"]
             
-            if size is not None and size != 384:
+            if size is not None and size != 1536:
                 self.qdrant.delete_collection(self.collection_name)
                 raise Exception("Recreate")
         except Exception as e:
@@ -63,7 +50,7 @@ class RAGService:
             try:
                 self.qdrant.create_collection(
                     collection_name=self.collection_name,
-                    vectors_config=models.VectorParams(size=384, distance=models.Distance.COSINE),
+                    vectors_config=models.VectorParams(size=1536, distance=models.Distance.COSINE),
                 )
             except:
                 pass
@@ -79,9 +66,9 @@ class RAGService:
             pass
 
     def _embed(self, text: str) -> list[float]:
-        # Generate embeddings using FastEmbed
-        embeddings = list(self.embedding_model.embed([text]))
-        return embeddings[0].tolist() 
+        # Generate embeddings using OpenAI API (runs remotely)
+        response = self.llm.embeddings.create(input=[text], model="text-embedding-3-small")
+        return response.data[0].embedding 
 
     async def ingest_document(self, tenant_id: str, filename: str, content: bytes, mime_type: str):
         # Offload blocking CPU/IO work to a thread
