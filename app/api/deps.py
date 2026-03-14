@@ -176,6 +176,7 @@ def require(permission: str):
                 "search:read",
                 "units:read",
                 "notifications:read", "notifications:write",
+                "ledger:read",
             ]:
                 return ctx
 
